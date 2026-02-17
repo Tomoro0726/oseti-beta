@@ -2113,7 +2113,6 @@ dependencies = [
  "nokhwa-core",
  "paste",
  "thiserror 2.0.18",
- "wgpu",
 ]
 
 [[package]]
@@ -2164,7 +2163,6 @@ dependencies = [
  "image",
  "mozjpeg",
  "thiserror 2.0.18",
- "wgpu",
 ]
 
 [[package]]

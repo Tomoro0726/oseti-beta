@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 eframe = "0.33.3"
 rayon = "1.10"
-nokhwa = { version = "0.10", features = ["input-native","output-wgpu"] }
+nokhwa = { version = "0.10", features = ["input-native"] }
