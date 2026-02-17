@@ -6,9 +6,14 @@ use std::time::Instant;
 
 fn main() -> eframe::Result {
     nokhwa::nokhwa_initialize(|_| {});
-    let options = eframe::NativeOptions::default();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+        ..Default::default()
+    };
+
     eframe::run_native(
-        "Oseti beta",
+        "Oseti Beta - Camera Switcher & Fader",
         options,
         Box::new(|cc| Ok(Box::new(CameraApp::new(&cc.egui_ctx)))),
     )
@@ -17,7 +22,10 @@ fn main() -> eframe::Result {
 struct CameraApp {
     camera: Option<Camera>,
     texture: Option<egui::TextureHandle>,
-    // フェードの管理
+    // カメラリスト管理
+    available_cameras: Vec<nokhwa::utils::CameraInfo>,
+    selected_index: usize,
+    // フェード管理
     alpha: f32, // 0.0 = Camera, 1.0 = Pattern
     target_alpha: f32,
     start_time: Instant,
@@ -28,22 +36,39 @@ impl CameraApp {
         let backend = native_api_backend().unwrap_or(ApiBackend::Auto);
         let cameras = query(backend).unwrap_or_default();
 
-        let mut camera = None;
-        if let Some(info) = cameras.first() {
-            let requested =
-                RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-            if let Ok(mut cam) = Camera::new(info.index().clone(), requested) {
-                let _ = cam.open_stream();
-                camera = Some(cam);
-            }
-        }
-
-        Self {
-            camera,
+        let mut app = Self {
+            camera: None,
             texture: None,
+            available_cameras: cameras,
+            selected_index: 0,
             alpha: 0.0,
             target_alpha: 0.0,
             start_time: Instant::now(),
+        };
+
+        // 最初のカメラを初期化
+        if !app.available_cameras.is_empty() {
+            app.init_camera(0);
+        }
+
+        app
+    }
+
+    fn init_camera(&mut self, index: usize) {
+        // 現在のストリームを停止してリセット
+        self.camera = None;
+
+        if let Some(info) = self.available_cameras.get(index) {
+            let requested =
+                RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+
+            if let Ok(mut cam) = Camera::new(info.index().clone(), requested) {
+                if cam.open_stream().is_ok() {
+                    self.camera = Some(cam);
+                    self.selected_index = index;
+                    println!("Started camera: {}", info.human_name());
+                }
+            }
         }
     }
 }
@@ -51,8 +76,8 @@ impl CameraApp {
 impl eframe::App for CameraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let dt = ctx.input(|i| i.stable_dt);
-        let fade_speed = 2.0; // 0.5秒で完了
-        if (self.alpha - self.target_alpha).abs() > 0.01 {
+        let fade_speed = 2.0;
+        if (self.alpha - self.target_alpha).abs() > 0.001 {
             if self.alpha < self.target_alpha {
                 self.alpha = (self.alpha + dt * fade_speed).min(1.0);
             } else {
@@ -76,15 +101,20 @@ impl eframe::App for CameraApp {
                         let idx_rgba = i * 4;
 
                         let x = (i % w) as f32;
-                        let p_val = (((x * 0.1 + time * 5.0).sin() + 1.0) * 127.0) as u8;
+                        let y = (i / w) as f32;
+
+                        let p_val = (((x * 0.05 + time * 2.0).sin()
+                            + (y * 0.05 + time).cos()
+                            + 2.0)
+                            * 60.0) as u8;
 
                         let r_c = cam_pixels[idx_rgb] as f32;
                         let g_c = cam_pixels[idx_rgb + 1] as f32;
                         let b_c = cam_pixels[idx_rgb + 2] as f32;
 
                         let r_p = p_val as f32;
-                        let g_p = p_val as f32;
-                        let b_p = 200.0;
+                        let g_p = (p_val / 2) as f32;
+                        let b_p = 255.0 * self.alpha; // 青みを強く
 
                         blended_pixels[idx_rgba] =
                             (r_c * (1.0 - self.alpha) + r_p * self.alpha) as u8;
@@ -101,7 +131,7 @@ impl eframe::App for CameraApp {
                         texture.set(color_image, egui::TextureOptions::LINEAR);
                     } else {
                         self.texture = Some(ctx.load_texture(
-                            "main",
+                            "main_stream",
                             color_image,
                             egui::TextureOptions::LINEAR,
                         ));
@@ -110,25 +140,56 @@ impl eframe::App for CameraApp {
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.heading("Oseti Beta - Switcher");
+                ui.separator();
+
+                let prev_index = self.selected_index;
+                egui::ComboBox::from_id_source("camera_list")
+                    .width(250.0)
+                    .selected_text(
+                        self.available_cameras
+                            .get(self.selected_index)
+                            .map(|c| c.human_name())
+                            .unwrap_or_else(|| "No Camera".to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (i, info) in self.available_cameras.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_index, i, info.human_name());
+                        }
+                    });
+
+                if prev_index != self.selected_index {
+                    self.init_camera(self.selected_index);
+                }
+
+                ui.separator();
+
                 if ui
-                    .selectable_label(self.target_alpha == 0.0, "Camera")
+                    .selectable_label(self.target_alpha == 0.0, "CAM")
                     .clicked()
                 {
                     self.target_alpha = 0.0;
                 }
                 if ui
-                    .selectable_label(self.target_alpha == 1.0, "Test Pattern")
+                    .selectable_label(self.target_alpha == 1.0, "PAT")
                     .clicked()
                 {
                     self.target_alpha = 1.0;
                 }
-                ui.add(egui::Slider::new(&mut self.alpha, 0.0..=1.0).text("Mix"));
-            });
 
+                ui.add(egui::Slider::new(&mut self.alpha, 0.0..=1.0).text("Mix Rate"));
+            });
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(texture) = &self.texture {
                 ui.image((texture.id(), ui.available_size()));
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Waiting for Camera Stream...");
+                });
             }
         });
 
