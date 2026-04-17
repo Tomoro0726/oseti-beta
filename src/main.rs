@@ -17,11 +17,14 @@
 
 mod camera;
 mod layout;
+mod recorder;
 
 use camera::{CameraId, CameraManager, FrameData};
 use eframe::egui;
 use layout::{LayoutConfig, LayoutType};
 use std::collections::HashMap;
+use std::sync::Arc;
+use recorder::{RecorderManager, RecordingTarget};
 
 const INITIAL_WIDTH: usize = 1280;
 const INITIAL_HEIGHT: usize = 720;
@@ -51,6 +54,8 @@ struct CameraApp {
     show_input_settings: bool,
     /// カメラ名などのラベルを表示するかどうか
     show_labels: bool,
+    /// 録画マネージャー
+    recorder_manager: RecorderManager,
 }
 
 impl CameraApp {
@@ -124,6 +129,7 @@ impl CameraApp {
             camera_errors,
             show_input_settings: false,
             show_labels: true,
+            recorder_manager: RecorderManager::new(),
         }
     }
 
@@ -174,6 +180,23 @@ impl CameraApp {
                                 height: frame_data.height,
                             },
                         );
+                    }
+
+                    // 録画セッションがあればフレームを転送する
+                    if self.recorder_manager.is_recording() {
+                        let frame_arc = Arc::new(frame_data);
+                        // カメラ単体としての録画へ
+                        self.recorder_manager.dispatch_frame(RecordingTarget::Camera(camera_id), frame_arc.clone());
+                        
+                        // もし現在 Program に選ばれていたら Program 用に送る
+                        if Some(camera_id) == self.selected_camera_id {
+                            self.recorder_manager.dispatch_frame(RecordingTarget::Program, frame_arc.clone());
+                        }
+                        
+                        // もし現在 Preview に選ばれていたら Preview 用に送る
+                        if Some(camera_id) == self.preview_camera_id {
+                            self.recorder_manager.dispatch_frame(RecordingTarget::Preview, frame_arc);
+                        }
                     }
                 }
                 Ok(None) => {
@@ -233,6 +256,9 @@ impl eframe::App for CameraApp {
                 ui.menu_button("Settings", |ui| {
                     if ui.button("⚙ Manage Inputs").clicked() {
                         self.show_input_settings = !self.show_input_settings;
+                    }
+                    if ui.button("⏺ Manage Recordings").clicked() {
+                        self.recorder_manager.show_settings = !self.recorder_manager.show_settings;
                     }
                     ui.separator();
                     ui.checkbox(&mut self.show_labels, "Show Labels");
@@ -322,6 +348,33 @@ impl eframe::App for CameraApp {
                         "📹 Cameras: {}",
                         self.camera_manager.available_cameras().len()
                     ));
+
+                    // 全体の録画コントロール
+                    if self.recorder_manager.is_recording() {
+                        if ui.button("🔴 Stop Recording").clicked() {
+                            self.recorder_manager.stop_all();
+                        }
+                    } else {
+                        // 設定されているものが1つ以上あるかチェック
+                        let has_enabled_targets = self.recorder_manager.record_configs.values().any(|&v| v);
+                        let mut btn = egui::Button::new("⏺ Start Recording");
+                        if !has_enabled_targets {
+                            btn = btn.fill(egui::Color32::DARK_GRAY);
+                        }
+                        
+                        // 1つ以上チェックがついている場合のみ押せるように、あるいはエラー表示
+                        if ui.add(btn).clicked() {
+                            if has_enabled_targets {
+                                // CameraInfo を取得するクロージャを渡す
+                                let available = self.camera_manager.available_cameras().to_vec();
+                                self.recorder_manager.start_selected(move |id| {
+                                    available.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_else(|| "Unknown".to_string())
+                                });
+                            }
+                        }
+                    }
+                    
+                    ui.separator();
                 });
             });
         });
@@ -400,6 +453,55 @@ impl eframe::App for CameraApp {
                 }
             });
         self.show_input_settings = show_settings;
+
+        // ===== 録画設定 ウィンドウ =====
+        let mut show_record_settings = self.recorder_manager.show_settings;
+        egui::Window::new("Record Settings")
+            .open(&mut show_record_settings)
+            .resizable(false)
+            .collapsible(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Save Directory: ");
+                    if ui.button("Select Folder").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.recorder_manager.save_dir = folder;
+                        }
+                    }
+                });
+                ui.label(format!("{}", self.recorder_manager.save_dir.display()));
+                ui.separator();
+                
+                ui.label("Select Targets to Record (mp4):");
+                
+                // Program, Preview
+                {
+                    let target = RecordingTarget::Program;
+                    let mut b = *self.recorder_manager.record_configs.get(&target).unwrap_or(&false);
+                    if ui.checkbox(&mut b, "Program").changed() {
+                        self.recorder_manager.record_configs.insert(target, b);
+                    }
+                }
+                {
+                    let target = RecordingTarget::Preview;
+                    let mut b = *self.recorder_manager.record_configs.get(&target).unwrap_or(&false);
+                    if ui.checkbox(&mut b, "Preview").changed() {
+                        self.recorder_manager.record_configs.insert(target, b);
+                    }
+                }
+
+                ui.separator();
+                ui.label("Cameras:");
+                let available_cameras = self.camera_manager.available_cameras().to_vec();
+                for camera in available_cameras {
+                    let target = RecordingTarget::Camera(camera.id);
+                    let mut b = *self.recorder_manager.record_configs.get(&target).unwrap_or(&false);
+                    if ui.checkbox(&mut b, &camera.name).changed() {
+                        self.recorder_manager.record_configs.insert(target, b);
+                    }
+                }
+            });
+        self.recorder_manager.show_settings = show_record_settings;
 
         // ===== トップパネル（プレビュー＆プログラム）=====
         // CentralPanelの内部余白(margin)を0に設定する
