@@ -11,15 +11,15 @@ use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecordingTarget {
-    Camera(CameraId),
+    Input(usize),
     Preview,
     Program,
 }
 
 impl RecordingTarget {
-    pub fn name(&self, get_cam_name: impl Fn(CameraId) -> String) -> String {
+    pub fn name(&self) -> String {
         match self {
-            RecordingTarget::Camera(id) => get_cam_name(*id),
+            RecordingTarget::Input(idx) => format!("Input_{}", idx + 1),
             RecordingTarget::Preview => "Preview".to_string(),
             RecordingTarget::Program => "Program".to_string(),
         }
