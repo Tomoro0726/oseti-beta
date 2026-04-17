@@ -152,8 +152,7 @@ impl CameraApp {
 
                     // Arcに入っている生ピクセルデータをeguiのColorImageに変換
                     // Arcによりメモリコピーは発生しない（eguiロード時にRGBA変換される）
-                    let color_image =
-                        egui::ColorImage::from_rgb([w, h], &frame_data.pixels);
+                    let color_image = egui::ColorImage::from_rgb([w, h], &frame_data.pixels);
 
                     // テクスチャを更新（なければ作成）
                     if let Some(tex) = self.camera_textures.get_mut(&camera_id) {
@@ -162,7 +161,8 @@ impl CameraApp {
                         tex.height = frame_data.height;
                     } else {
                         let name = format!("camera_tex_{}", camera_id.0);
-                        let handle = ctx.load_texture(&name, color_image, egui::TextureOptions::LINEAR);
+                        let handle =
+                            ctx.load_texture(&name, color_image, egui::TextureOptions::LINEAR);
                         self.camera_textures.insert(
                             camera_id,
                             CameraTexture {
@@ -407,9 +407,10 @@ impl eframe::App for CameraApp {
                     if let Some(tex) = self.camera_textures.get(&id) {
                         let img_aspect = tex.width as f32 / tex.height as f32;
                         let target_aspect = 16.0 / 9.0;
-                        
-                        let mut uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                        
+
+                        let mut uv =
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
                         // 画像が縦長の場合（上下をカット）
                         if img_aspect < target_aspect {
                             let crop_ratio = img_aspect / target_aspect;
@@ -418,7 +419,7 @@ impl eframe::App for CameraApp {
                                 egui::pos2(0.0, offset),
                                 egui::pos2(1.0, 1.0 - offset),
                             );
-                        } 
+                        }
                         // 画像が横長の場合（左右をカット）
                         else if img_aspect > target_aspect {
                             let crop_ratio = target_aspect / img_aspect;
@@ -463,7 +464,11 @@ impl eframe::App for CameraApp {
             for r in 0..rows {
                 for c in 0..cols {
                     let rect = egui::Rect::from_min_size(
-                        base_pos + egui::vec2(c as f32 * cell_width, top_height as f32 + r as f32 * cell_height),
+                        base_pos
+                            + egui::vec2(
+                                c as f32 * cell_width,
+                                top_height as f32 + r as f32 * cell_height,
+                            ),
                         egui::vec2(cell_width, cell_height),
                     );
 

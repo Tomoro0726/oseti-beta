@@ -5,7 +5,7 @@
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::{Camera, native_api_backend, query};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 /// カメラIDの型安全なラッパー
@@ -35,7 +35,8 @@ pub struct CameraManager {
     /// 利用可能なカメラの情報リスト
     available_cameras: Vec<CameraInfo>,
     /// カメラごとのフレーム受信チャネル（バックグラウンドスレッドで取得したフレームを受信）
-    active_receivers: std::collections::HashMap<CameraId, mpsc::Receiver<Result<FrameData, String>>>,
+    active_receivers:
+        std::collections::HashMap<CameraId, mpsc::Receiver<Result<FrameData, String>>>,
 }
 
 impl CameraManager {
@@ -104,12 +105,14 @@ impl CameraManager {
             }
 
             loop {
-                let frame_res = cam.frame().map_err(|e| format!("Frame capture failed: {}", e));
-                
+                let frame_res = cam
+                    .frame()
+                    .map_err(|e| format!("Frame capture failed: {}", e));
+
                 let processed_frame = frame_res.and_then(|frame| {
                     let rgb_image = match frame.decode_image::<RgbFormat>() {
                         Ok(img) => img,
-                        Err(e) => return Err(format!("Frame decode failed: {}", e))
+                        Err(e) => return Err(format!("Frame decode failed: {}", e)),
                     };
 
                     let width = rgb_image.width();
