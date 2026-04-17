@@ -7,3 +7,4 @@ edition = "2024"
 eframe = "0.33.3"
 rayon = "1.10"
 nokhwa = { version = "0.10", features = ["input-native"] }
+num_cpus = "1.16"
