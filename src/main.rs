@@ -49,6 +49,8 @@ struct CameraApp {
     camera_errors: HashMap<CameraId, String>,
     /// 入力管理ウィンドウの表示状態
     show_input_settings: bool,
+    /// カメラ名などのラベルを表示するかどうか
+    show_labels: bool,
 }
 
 impl CameraApp {
@@ -121,6 +123,7 @@ impl CameraApp {
             preview_camera_id,
             camera_errors,
             show_input_settings: false,
+            show_labels: true,
         }
     }
 
@@ -202,6 +205,8 @@ impl eframe::App for CameraApp {
                     if ui.button("⚙ Manage Inputs").clicked() {
                         self.show_input_settings = !self.show_input_settings;
                     }
+                    ui.separator();
+                    ui.checkbox(&mut self.show_labels, "Show Labels");
                 });
 
                 ui.menu_button("Cameras", |ui| {
@@ -392,7 +397,7 @@ impl eframe::App for CameraApp {
             painter.rect_filled(bg_rect, 0.0, egui::Color32::BLACK);
 
             // 画像のUVと描画をヘルパー関数で処理
-            let draw_cam = |camera_id: Option<CameraId>, rect: egui::Rect| {
+            let draw_cam = |camera_id: Option<CameraId>, rect: egui::Rect, label_text: &str| {
                 // 枠のボーダーを描画
                 painter.rect(
                     rect,
@@ -433,6 +438,33 @@ impl eframe::App for CameraApp {
                         painter.image(tex.handle.id(), rect, uv, egui::Color32::WHITE);
                     }
                 }
+
+                // 文字ラベルの描画
+                if self.show_labels && !label_text.is_empty() {
+                    let text_color = egui::Color32::WHITE;
+                    let bg_color = egui::Color32::from_black_alpha(160); // 半透明の黒
+                    let font_id = egui::FontId::proportional(16.0);
+
+                    // フォントのレイアウトを計算するため、一時的に galley を作成
+                    let galley =
+                        painter.layout_no_wrap(label_text.to_string(), font_id, text_color);
+
+                    let text_size = galley.size();
+                    // 中央下部に配置。下からすこし(4px)だけ浮かせる
+                    let text_pos = egui::pos2(
+                        rect.center().x - text_size.x / 2.0,
+                        rect.max.y - text_size.y - 4.0,
+                    );
+
+                    // 背景の矩形をテキストより少し大きめに描画（パディング2px）
+                    let bg_rect = egui::Rect::from_min_size(
+                        text_pos - egui::vec2(6.0, 2.0),
+                        text_size + egui::vec2(12.0, 4.0),
+                    );
+
+                    painter.rect_filled(bg_rect, 4.0, bg_color); // 角丸4px
+                    painter.galley(text_pos, galley, egui::Color32::WHITE);
+                }
             };
 
             let base_pos = response.rect.min + egui::vec2(x_offset, y_offset);
@@ -442,14 +474,14 @@ impl eframe::App for CameraApp {
                 base_pos,
                 egui::vec2(top_view_width as f32, top_height as f32),
             );
-            draw_cam(self.preview_camera_id, preview_rect);
+            draw_cam(self.preview_camera_id, preview_rect, "Preview");
 
             // ② プログラム（右上）
             let program_rect = egui::Rect::from_min_size(
                 base_pos + egui::vec2(top_view_width as f32, 0.0),
                 egui::vec2(top_view_width as f32, top_height as f32),
             );
-            draw_cam(self.selected_camera_id, program_rect);
+            draw_cam(self.selected_camera_id, program_rect, "Program");
 
             // ③ マルチビュー（下段 4x2）
             let mut view_idx = 0;
@@ -473,13 +505,16 @@ impl eframe::App for CameraApp {
                     );
 
                     // レイアウト上のカメラIDを取得
-                    let cam_id = if view_idx < self.layout_config.view_count() {
-                        self.layout_config.view(view_idx).and_then(|v| v.camera_id)
+                    let (cam_id, cam_label) = if view_idx < self.layout_config.view_count() {
+                        (
+                            self.layout_config.view(view_idx).and_then(|v| v.camera_id),
+                            format!("Cam {}", view_idx + 1),
+                        )
                     } else {
-                        None
+                        (None, String::new())
                     };
 
-                    draw_cam(cam_id, rect);
+                    draw_cam(cam_id, rect, &cam_label);
                     view_idx += 1;
                 }
             }
