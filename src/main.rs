@@ -189,6 +189,35 @@ impl CameraApp {
 
 impl eframe::App for CameraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // キーボード入力処理
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            // エンターキーでプログラムとプレビューをスイッチング（スワップ）
+            let temp = self.selected_camera_id;
+            self.selected_camera_id = self.preview_camera_id;
+            self.preview_camera_id = temp;
+        }
+
+        // 数字キー(1〜8)でプレビューカメラを切り替え（レイアウト上の入力スロットに基づく）
+        let num_keys = [
+            (egui::Key::Num1, 0),
+            (egui::Key::Num2, 1),
+            (egui::Key::Num3, 2),
+            (egui::Key::Num4, 3),
+            (egui::Key::Num5, 4),
+            (egui::Key::Num6, 5),
+            (egui::Key::Num7, 6),
+            (egui::Key::Num8, 7),
+        ];
+        for (key, idx) in num_keys.iter() {
+            if ctx.input(|i| i.key_pressed(*key)) {
+                if let Some(view) = self.layout_config.view(*idx) {
+                    if let Some(cam_id) = view.camera_id {
+                        self.preview_camera_id = Some(cam_id);
+                    }
+                }
+            }
+        }
+
         // フレームをキャプチャ
         self.capture_all_frames(ctx);
 
@@ -397,15 +426,31 @@ impl eframe::App for CameraApp {
             painter.rect_filled(bg_rect, 0.0, egui::Color32::BLACK);
 
             // 画像のUVと描画をヘルパー関数で処理
-            let draw_cam = |camera_id: Option<CameraId>, rect: egui::Rect, label_text: &str| {
-                // 枠のボーダーを描画
-                painter.rect(
-                    rect,
-                    0.0,
-                    egui::Color32::TRANSPARENT,
-                    egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
-                    egui::StrokeKind::Inside,
-                );
+            let draw_cam = |camera_id: Option<CameraId>,
+                            rect: egui::Rect,
+                            label_text: &str,
+                            border_override: Option<egui::Color32>| {
+                let mut is_preview = false;
+                let mut is_program = false;
+
+                if let Some(id) = camera_id {
+                    is_preview = Some(id) == self.preview_camera_id;
+                    is_program = Some(id) == self.selected_camera_id;
+                }
+
+                let mut stroke_color = egui::Color32::DARK_GRAY;
+                let mut stroke_width = 1.0;
+
+                if let Some(c) = border_override {
+                    stroke_color = c;
+                    stroke_width = 3.0;
+                } else if is_program {
+                    stroke_color = egui::Color32::RED;
+                    stroke_width = 3.0; // プログラムは赤枠
+                } else if is_preview {
+                    stroke_color = egui::Color32::GREEN;
+                    stroke_width = 3.0; // プレビューは緑枠
+                }
 
                 if let Some(id) = camera_id {
                     // テクスチャがあれば取得
@@ -437,6 +482,27 @@ impl eframe::App for CameraApp {
 
                         painter.image(tex.handle.id(), rect, uv, egui::Color32::WHITE);
                     }
+                }
+
+                // 枠のボーダーを画像の上に描画
+                painter.rect(
+                    rect,
+                    0.0,
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(stroke_width, stroke_color),
+                    egui::StrokeKind::Inside,
+                );
+
+                // もし「マルチビュー」で、かつプレビュー・プログラム両方に選ばれているなら
+                // 赤枠の内側にさらに緑枠を書いて、両方選ばれていることが分かるようにする
+                if border_override.is_none() && is_program && is_preview {
+                    painter.rect(
+                        rect.shrink(3.0),
+                        0.0,
+                        egui::Color32::TRANSPARENT,
+                        egui::Stroke::new(3.0, egui::Color32::GREEN),
+                        egui::StrokeKind::Inside,
+                    );
                 }
 
                 // 文字ラベルの描画
@@ -474,14 +540,24 @@ impl eframe::App for CameraApp {
                 base_pos,
                 egui::vec2(top_view_width as f32, top_height as f32),
             );
-            draw_cam(self.preview_camera_id, preview_rect, "Preview");
+            draw_cam(
+                self.preview_camera_id,
+                preview_rect,
+                "Preview",
+                Some(egui::Color32::GREEN),
+            );
 
             // ② プログラム（右上）
             let program_rect = egui::Rect::from_min_size(
                 base_pos + egui::vec2(top_view_width as f32, 0.0),
                 egui::vec2(top_view_width as f32, top_height as f32),
             );
-            draw_cam(self.selected_camera_id, program_rect, "Program");
+            draw_cam(
+                self.selected_camera_id,
+                program_rect,
+                "Program",
+                Some(egui::Color32::RED),
+            );
 
             // ③ マルチビュー（下段 4x2）
             let mut view_idx = 0;
@@ -514,7 +590,7 @@ impl eframe::App for CameraApp {
                         (None, String::new())
                     };
 
-                    draw_cam(cam_id, rect, &cam_label);
+                    draw_cam(cam_id, rect, &cam_label, None);
                     view_idx += 1;
                 }
             }
