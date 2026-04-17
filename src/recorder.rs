@@ -6,7 +6,7 @@ use std::io::Write;
 use crate::camera::{CameraId, FrameData};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,19 +54,26 @@ impl RecorderManager {
         !self.sessions.is_empty()
     }
 
-    pub fn start_selected(&mut self, get_cam_name: impl Fn(CameraId) -> String + Send + Sync + 'static) {
+    pub fn start_selected(
+        &mut self,
+        get_cam_name: impl Fn(CameraId) -> String + Send + Sync + 'static,
+    ) {
         for (target, enabled) in &self.record_configs {
             if *enabled && !self.sessions.contains_key(target) {
                 let (tx, rx) = mpsc::sync_channel::<Arc<FrameData>>(5); // バッファを持たせる
-                
+
                 let target_clone = *target;
                 let save_dir = self.save_dir.clone();
                 let name = target.name(&get_cam_name);
-                
+
                 let handle = thread::spawn(move || {
-                    let filename = format!("{}_{}.h264", chrono::Local::now().format("%Y%m%d_%H%M%S"), name);
+                    let filename = format!(
+                        "{}_{}.h264",
+                        chrono::Local::now().format("%Y%m%d_%H%M%S"),
+                        name
+                    );
                     let filepath = save_dir.join(filename);
-                    
+
                     let mut file = match File::create(&filepath) {
                         Ok(f) => f,
                         Err(e) => {
@@ -76,11 +83,11 @@ impl RecorderManager {
                     };
 
                     println!("Started recording to {:?}", filepath);
-                    
+
                     let mut encoder: Option<Encoder> = None;
                     let mut target_width = 1280;
                     let mut target_height = 720;
-                    
+
                     while let Ok(frame) = rx.recv() {
                         let width = frame.width as usize;
                         let height = frame.height as usize;
@@ -103,60 +110,71 @@ impl RecorderManager {
                         let pixels = &frame.pixels;
                         let y_len = target_width * target_height;
                         let uv_len = (target_width / 2) * (target_height / 2);
-                        
+
                         let mut yuv_buf = vec![0u8; y_len + uv_len * 2];
-                        
+
                         // Y平面の変換
                         let (y_plane, uv_planes) = yuv_buf.split_at_mut(y_len);
                         let (u_plane, v_plane) = uv_planes.split_at_mut(uv_len);
-                        
-                        y_plane.par_chunks_mut(target_width).enumerate().for_each(|(y, row)| {
-                            for x in 0..target_width {
-                                let idx = (y * width + x) * 3;
-                                if idx + 2 < pixels.len() {
-                                    let r = pixels[idx] as f32;
-                                    let g = pixels[idx + 1] as f32;
-                                    let b = pixels[idx + 2] as f32;
-                                    let y_val = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
-                                    row[x] = y_val;
+
+                        y_plane
+                            .par_chunks_mut(target_width)
+                            .enumerate()
+                            .for_each(|(y, row)| {
+                                for x in 0..target_width {
+                                    let idx = (y * width + x) * 3;
+                                    if idx + 2 < pixels.len() {
+                                        let r = pixels[idx] as f32;
+                                        let g = pixels[idx + 1] as f32;
+                                        let b = pixels[idx + 2] as f32;
+                                        let y_val = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
+                                        row[x] = y_val;
+                                    }
                                 }
-                            }
-                        });
-                        
+                            });
+
                         // UV平面の変換
-                        u_plane.par_chunks_mut(target_width / 2).enumerate().for_each(|(y, row)| {
-                            let src_y = y * 2;
-                            for x in 0..target_width / 2 {
-                                let src_x = x * 2;
-                                let idx = (src_y * width + src_x) * 3;
-                                if idx + 2 < pixels.len() {
-                                    let r = pixels[idx] as f32;
-                                    let g = pixels[idx + 1] as f32;
-                                    let b = pixels[idx + 2] as f32;
-                                    
-                                    let u_val = (-0.147 * r - 0.289 * g + 0.436 * b + 128.0) as u8;
-                                    row[x] = u_val;
+                        u_plane
+                            .par_chunks_mut(target_width / 2)
+                            .enumerate()
+                            .for_each(|(y, row)| {
+                                let src_y = y * 2;
+                                for x in 0..target_width / 2 {
+                                    let src_x = x * 2;
+                                    let idx = (src_y * width + src_x) * 3;
+                                    if idx + 2 < pixels.len() {
+                                        let r = pixels[idx] as f32;
+                                        let g = pixels[idx + 1] as f32;
+                                        let b = pixels[idx + 2] as f32;
+
+                                        let u_val =
+                                            (-0.147 * r - 0.289 * g + 0.436 * b + 128.0) as u8;
+                                        row[x] = u_val;
+                                    }
                                 }
-                            }
-                        });
-                        
+                            });
+
                         // V平面の変換
-                        v_plane.par_chunks_mut(target_width / 2).enumerate().for_each(|(y, row)| {
-                            let src_y = y * 2;
-                            for x in 0..target_width / 2 {
-                                let src_x = x * 2;
-                                let idx = (src_y * width + src_x) * 3;
-                                if idx + 2 < pixels.len() {
-                                    let r = pixels[idx] as f32;
-                                    let g = pixels[idx + 1] as f32;
-                                    let b = pixels[idx + 2] as f32;
-                                    
-                                    let v_val = (0.615 * r - 0.515 * g - 0.100 * b + 128.0) as u8;
-                                    row[x] = v_val;
+                        v_plane
+                            .par_chunks_mut(target_width / 2)
+                            .enumerate()
+                            .for_each(|(y, row)| {
+                                let src_y = y * 2;
+                                for x in 0..target_width / 2 {
+                                    let src_x = x * 2;
+                                    let idx = (src_y * width + src_x) * 3;
+                                    if idx + 2 < pixels.len() {
+                                        let r = pixels[idx] as f32;
+                                        let g = pixels[idx + 1] as f32;
+                                        let b = pixels[idx + 2] as f32;
+
+                                        let v_val =
+                                            (0.615 * r - 0.515 * g - 0.100 * b + 128.0) as u8;
+                                        row[x] = v_val;
+                                    }
                                 }
-                            }
-                        });
-                        
+                            });
+
                         if let Some(ref mut enc) = encoder {
                             use openh264::formats::YUVBuffer;
                             let yuv = YUVBuffer::from_vec(yuv_buf, target_width, target_height);
@@ -167,15 +185,18 @@ impl RecorderManager {
                             }
                         }
                     }
-                    
+
                     println!("Stopped recording to {:?}", filepath);
                 });
 
-                self.sessions.insert(*target, RecordingSession {
-                    target: *target,
-                    tx,
-                    handle: Some(handle),
-                });
+                self.sessions.insert(
+                    *target,
+                    RecordingSession {
+                        target: *target,
+                        tx,
+                        handle: Some(handle),
+                    },
+                );
             }
         }
     }

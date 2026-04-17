@@ -22,9 +22,9 @@ mod recorder;
 use camera::{CameraId, CameraManager, FrameData};
 use eframe::egui;
 use layout::{LayoutConfig, LayoutType};
+use recorder::{RecorderManager, RecordingTarget};
 use std::collections::HashMap;
 use std::sync::Arc;
-use recorder::{RecorderManager, RecordingTarget};
 
 const INITIAL_WIDTH: usize = 1280;
 const INITIAL_HEIGHT: usize = 720;
@@ -186,16 +186,19 @@ impl CameraApp {
                     if self.recorder_manager.is_recording() {
                         let frame_arc = Arc::new(frame_data);
                         // カメラ単体としての録画へ
-                        self.recorder_manager.dispatch_frame(RecordingTarget::Camera(camera_id), frame_arc.clone());
-                        
+                        self.recorder_manager
+                            .dispatch_frame(RecordingTarget::Camera(camera_id), frame_arc.clone());
+
                         // もし現在 Program に選ばれていたら Program 用に送る
                         if Some(camera_id) == self.selected_camera_id {
-                            self.recorder_manager.dispatch_frame(RecordingTarget::Program, frame_arc.clone());
+                            self.recorder_manager
+                                .dispatch_frame(RecordingTarget::Program, frame_arc.clone());
                         }
-                        
+
                         // もし現在 Preview に選ばれていたら Preview 用に送る
                         if Some(camera_id) == self.preview_camera_id {
-                            self.recorder_manager.dispatch_frame(RecordingTarget::Preview, frame_arc);
+                            self.recorder_manager
+                                .dispatch_frame(RecordingTarget::Preview, frame_arc);
                         }
                     }
                 }
@@ -356,24 +359,29 @@ impl eframe::App for CameraApp {
                         }
                     } else {
                         // 設定されているものが1つ以上あるかチェック
-                        let has_enabled_targets = self.recorder_manager.record_configs.values().any(|&v| v);
+                        let has_enabled_targets =
+                            self.recorder_manager.record_configs.values().any(|&v| v);
                         let mut btn = egui::Button::new("⏺ Start Recording");
                         if !has_enabled_targets {
                             btn = btn.fill(egui::Color32::DARK_GRAY);
                         }
-                        
+
                         // 1つ以上チェックがついている場合のみ押せるように、あるいはエラー表示
                         if ui.add(btn).clicked() {
                             if has_enabled_targets {
                                 // CameraInfo を取得するクロージャを渡す
                                 let available = self.camera_manager.available_cameras().to_vec();
                                 self.recorder_manager.start_selected(move |id| {
-                                    available.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_else(|| "Unknown".to_string())
+                                    available
+                                        .iter()
+                                        .find(|c| c.id == id)
+                                        .map(|c| c.name.clone())
+                                        .unwrap_or_else(|| "Unknown".to_string())
                                 });
                             }
                         }
                     }
-                    
+
                     ui.separator();
                 });
             });
@@ -471,20 +479,28 @@ impl eframe::App for CameraApp {
                 });
                 ui.label(format!("{}", self.recorder_manager.save_dir.display()));
                 ui.separator();
-                
+
                 ui.label("Select Targets to Record (mp4):");
-                
+
                 // Program, Preview
                 {
                     let target = RecordingTarget::Program;
-                    let mut b = *self.recorder_manager.record_configs.get(&target).unwrap_or(&false);
+                    let mut b = *self
+                        .recorder_manager
+                        .record_configs
+                        .get(&target)
+                        .unwrap_or(&false);
                     if ui.checkbox(&mut b, "Program").changed() {
                         self.recorder_manager.record_configs.insert(target, b);
                     }
                 }
                 {
                     let target = RecordingTarget::Preview;
-                    let mut b = *self.recorder_manager.record_configs.get(&target).unwrap_or(&false);
+                    let mut b = *self
+                        .recorder_manager
+                        .record_configs
+                        .get(&target)
+                        .unwrap_or(&false);
                     if ui.checkbox(&mut b, "Preview").changed() {
                         self.recorder_manager.record_configs.insert(target, b);
                     }
@@ -495,7 +511,11 @@ impl eframe::App for CameraApp {
                 let available_cameras = self.camera_manager.available_cameras().to_vec();
                 for camera in available_cameras {
                     let target = RecordingTarget::Camera(camera.id);
-                    let mut b = *self.recorder_manager.record_configs.get(&target).unwrap_or(&false);
+                    let mut b = *self
+                        .recorder_manager
+                        .record_configs
+                        .get(&target)
+                        .unwrap_or(&false);
                     if ui.checkbox(&mut b, &camera.name).changed() {
                         self.recorder_manager.record_configs.insert(target, b);
                     }
