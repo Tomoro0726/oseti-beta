@@ -17,16 +17,21 @@
 
 mod camera;
 mod layout;
-mod renderer;
 
-use camera::{CameraId, CameraManager};
+use camera::{CameraId, CameraManager, FrameData};
 use eframe::egui;
 use layout::{LayoutConfig, LayoutType};
-use renderer::{FrameData, MultiViewRenderer};
 use std::collections::HashMap;
 
 const INITIAL_WIDTH: usize = 1280;
 const INITIAL_HEIGHT: usize = 720;
+
+/// 各カメラごとのテクスチャ管理
+struct CameraTexture {
+    handle: egui::TextureHandle,
+    width: u32,
+    height: u32,
+}
 
 /// メインアプリケーション状態
 struct CameraApp {
@@ -34,24 +39,16 @@ struct CameraApp {
     camera_manager: CameraManager,
     /// マルチビューレイアウト設定（プレビュー用）
     layout_config: LayoutConfig,
-    /// マルチビューレンダラー（プレビュー用）
-    preview_renderer: MultiViewRenderer,
-    /// プログラム用レンダラー（選択カメラ表示）
-    program_renderer: MultiViewRenderer,
-    /// マルチビュー用レンダラー（下段グリッド）
-    multiview_renderer: MultiViewRenderer,
-    /// プレビュー表示用テクスチャ
-    preview_texture: Option<egui::TextureHandle>,
-    /// プログラム表示用テクスチャ
-    program_texture: Option<egui::TextureHandle>,
-    /// マルチビュー表示用テクスチャ
-    multiview_texture: Option<egui::TextureHandle>,
+    /// カメラごとの描画用テクスチャ
+    camera_textures: HashMap<CameraId, CameraTexture>,
     /// 選択中のカメラID
     selected_camera_id: Option<CameraId>,
     /// プレビュー中のカメラID
     preview_camera_id: Option<CameraId>,
     /// カメラごとの最新エラー
     camera_errors: HashMap<CameraId, String>,
+    /// 入力管理ウィンドウの表示状態
+    show_input_settings: bool,
 }
 
 impl CameraApp {
@@ -119,101 +116,70 @@ impl CameraApp {
         Self {
             camera_manager,
             layout_config,
-            preview_renderer: MultiViewRenderer::new(LayoutType::Single),
-            program_renderer: MultiViewRenderer::new(LayoutType::Single),
-            multiview_renderer: MultiViewRenderer::new(input_layout_type),
-            preview_texture: None,
-            program_texture: None,
-            multiview_texture: None,
+            camera_textures: HashMap::new(),
             selected_camera_id,
             preview_camera_id,
             camera_errors,
+            show_input_settings: false,
         }
     }
 
-    /// すべてのビューのフレームをキャプチャ
-    fn capture_all_frames(&mut self) {
+    /// フレームを受信しテクスチャを更新する
+    fn capture_all_frames(&mut self, ctx: &egui::Context) {
+        // 表示が必要な全カメラIDをリストアップ
+        let mut needed_cameras = std::collections::HashSet::new();
+
+        if let Some(id) = self.preview_camera_id {
+            needed_cameras.insert(id);
+        }
+        if let Some(id) = self.selected_camera_id {
+            needed_cameras.insert(id);
+        }
         for view_idx in 0..self.layout_config.view_count() {
             if let Some(view) = self.layout_config.view(view_idx) {
-                if let Some(camera_id) = view.camera_id {
-                    match self.camera_manager.get_frame(camera_id) {
-                        Ok((pixels, width, height)) => {
-                            let frame_data = FrameData {
-                                pixels,
-                                width,
-                                height,
-                            };
-                            // 下段8入力用にキャッシュ
-                            self.multiview_renderer.cache_frame(view_idx, frame_data);
-                            self.camera_errors.remove(&camera_id);
-                        }
-                        Err(e) => {
-                            self.multiview_renderer.clear_frame(view_idx);
-                            self.camera_errors.insert(camera_id, e.clone());
-                            eprintln!(
-                                "ERROR [View {}]: Failed to capture frame from camera: {}",
-                                view_idx, e
-                            );
-                        }
+                if let Some(id) = view.camera_id {
+                    needed_cameras.insert(id);
+                }
+            }
+        }
+
+        for camera_id in needed_cameras {
+            match self.camera_manager.get_frame(camera_id) {
+                Ok(Some(frame_data)) => {
+                    self.camera_errors.remove(&camera_id);
+                    let w = frame_data.width as usize;
+                    let h = frame_data.height as usize;
+
+                    // Arcに入っている生ピクセルデータをeguiのColorImageに変換
+                    // Arcによりメモリコピーは発生しない（eguiロード時にRGBA変換される）
+                    let color_image =
+                        egui::ColorImage::from_rgb([w, h], &frame_data.pixels);
+
+                    // テクスチャを更新（なければ作成）
+                    if let Some(tex) = self.camera_textures.get_mut(&camera_id) {
+                        tex.handle.set(color_image, egui::TextureOptions::LINEAR);
+                        tex.width = frame_data.width;
+                        tex.height = frame_data.height;
+                    } else {
+                        let name = format!("camera_tex_{}", camera_id.0);
+                        let handle = ctx.load_texture(&name, color_image, egui::TextureOptions::LINEAR);
+                        self.camera_textures.insert(
+                            camera_id,
+                            CameraTexture {
+                                handle,
+                                width: frame_data.width,
+                                height: frame_data.height,
+                            },
+                        );
                     }
-                } else {
-                    self.multiview_renderer.clear_frame(view_idx);
                 }
-            }
-        }
-    }
-
-    /// プレビュー（選択カメラ）のフレームをキャプチャ
-    fn capture_preview_frame(&mut self) {
-        if let Some(camera_id) = self.preview_camera_id {
-            match self.camera_manager.get_frame(camera_id) {
-                Ok((pixels, width, height)) => {
-                    let frame_data = FrameData {
-                        pixels,
-                        width,
-                        height,
-                    };
-                    self.preview_renderer.cache_frame(0, frame_data);
-                    self.camera_errors.remove(&camera_id);
+                Ok(None) => {
+                    // まだ新しいフレームが無いので何もしない (ノンブロッキング)
                 }
                 Err(e) => {
-                    self.preview_renderer.clear_frame(0);
-                    self.camera_errors.insert(camera_id, e.clone());
-                    eprintln!(
-                        "ERROR [Preview Camera]: Failed to capture frame from camera: {}",
-                        e
-                    );
+                    self.camera_errors.insert(camera_id, e);
                 }
             }
-        } else {
-            self.preview_renderer.clear_frame(0);
-        }
-    }
-
-    /// プログラム（選択カメラ）のフレームをキャプチャ
-    fn capture_program_frame(&mut self) {
-        if let Some(camera_id) = self.selected_camera_id {
-            match self.camera_manager.get_frame(camera_id) {
-                Ok((pixels, width, height)) => {
-                    let frame_data = FrameData {
-                        pixels,
-                        width,
-                        height,
-                    };
-                    self.program_renderer.cache_frame(0, frame_data);
-                    self.camera_errors.remove(&camera_id);
-                }
-                Err(e) => {
-                    self.program_renderer.clear_frame(0);
-                    self.camera_errors.insert(camera_id, e.clone());
-                    eprintln!(
-                        "ERROR [Program Camera]: Failed to capture frame from camera: {}",
-                        e
-                    );
-                }
-            }
-        } else {
-            self.program_renderer.clear_frame(0);
         }
     }
 }
@@ -221,111 +187,185 @@ impl CameraApp {
 impl eframe::App for CameraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // フレームをキャプチャ
-        self.capture_all_frames();
-        self.capture_preview_frame();
-        self.capture_program_frame();
+        self.capture_all_frames(ctx);
 
-        // ===== ボトムパネル（コントロール） =====
-        egui::TopBottomPanel::bottom("control_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "📹 Cameras: {}",
-                    self.camera_manager.available_cameras().len()
-                ));
-                ui.separator();
-                ui.label("Layout: Fixed 8 Inputs (2x4)");
-                ui.separator();
+        // ===== トップメニューバー =====
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Exit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
 
-                // カメラ選択
-                let camera_names: Vec<String> = self
-                    .camera_manager
-                    .available_cameras()
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect();
+                ui.menu_button("Settings", |ui| {
+                    if ui.button("⚙ Manage Inputs").clicked() {
+                        self.show_input_settings = !self.show_input_settings;
+                    }
+                });
 
-                let selected_idx = self
-                    .selected_camera_id
-                    .and_then(|id| {
-                        self.camera_manager
-                            .available_cameras()
-                            .iter()
-                            .position(|c| c.id == id)
-                    })
-                    .unwrap_or(0);
+                ui.menu_button("Cameras", |ui| {
+                    let camera_names: Vec<String> = self
+                        .camera_manager
+                        .available_cameras()
+                        .iter()
+                        .map(|c| c.name.clone())
+                        .collect();
 
-                let mut new_selected = selected_idx;
-                egui::ComboBox::from_label("Program Camera")
-                    .selected_text(camera_names.get(selected_idx).cloned().unwrap_or_default())
-                    .show_ui(ui, |ui| {
+                    // プログラムカメラの選択
+                    ui.menu_button("Program Camera", |ui| {
+                        let selected_idx = self
+                            .selected_camera_id
+                            .and_then(|id| {
+                                self.camera_manager
+                                    .available_cameras()
+                                    .iter()
+                                    .position(|c| c.id == id)
+                            })
+                            .unwrap_or(0);
+
+                        let mut new_selected = selected_idx;
                         for (i, name) in camera_names.iter().enumerate() {
-                            ui.selectable_value(&mut new_selected, i, name);
+                            ui.radio_value(&mut new_selected, i, name);
+                        }
+
+                        if new_selected != selected_idx
+                            && new_selected < self.camera_manager.available_cameras().len()
+                        {
+                            let new_camera = &self.camera_manager.available_cameras()[new_selected];
+                            let new_id = new_camera.id;
+                            match self.camera_manager.open_camera(new_id) {
+                                Ok(_) => {
+                                    self.selected_camera_id = Some(new_id);
+                                    self.camera_errors.remove(&new_id);
+                                }
+                                Err(e) => {
+                                    self.camera_errors
+                                        .insert(new_id, format!("open failed: {}", e));
+                                }
+                            }
                         }
                     });
 
-                let preview_idx = self
-                    .preview_camera_id
-                    .and_then(|id| {
-                        self.camera_manager
-                            .available_cameras()
-                            .iter()
-                            .position(|c| c.id == id)
-                    })
-                    .unwrap_or(0);
-                let mut new_preview = preview_idx;
-                egui::ComboBox::from_label("Preview Camera")
-                    .selected_text(camera_names.get(preview_idx).cloned().unwrap_or_default())
-                    .show_ui(ui, |ui| {
+                    // プレビューカメラの選択
+                    ui.menu_button("Preview Camera", |ui| {
+                        let preview_idx = self
+                            .preview_camera_id
+                            .and_then(|id| {
+                                self.camera_manager
+                                    .available_cameras()
+                                    .iter()
+                                    .position(|c| c.id == id)
+                            })
+                            .unwrap_or(0);
+
+                        let mut new_preview = preview_idx;
                         for (i, name) in camera_names.iter().enumerate() {
-                            ui.selectable_value(&mut new_preview, i, name);
+                            ui.radio_value(&mut new_preview, i, name);
+                        }
+
+                        if new_preview != preview_idx
+                            && new_preview < self.camera_manager.available_cameras().len()
+                        {
+                            let new_camera = &self.camera_manager.available_cameras()[new_preview];
+                            let new_id = new_camera.id;
+                            match self.camera_manager.open_camera(new_id) {
+                                Ok(_) => {
+                                    self.preview_camera_id = Some(new_id);
+                                    self.camera_errors.remove(&new_id);
+                                }
+                                Err(e) => {
+                                    self.camera_errors
+                                        .insert(new_id, format!("open failed: {}", e));
+                                }
+                            }
                         }
                     });
+                });
 
-                if new_selected != selected_idx
-                    && new_selected < self.camera_manager.available_cameras().len()
-                {
-                    let new_camera = &self.camera_manager.available_cameras()[new_selected];
-                    let new_id = new_camera.id;
-                    match self.camera_manager.open_camera(new_id) {
-                        Ok(_) => {
-                            self.selected_camera_id = Some(new_id);
-                            self.camera_errors.remove(&new_id);
-                        }
-                        Err(e) => {
-                            self.camera_errors
-                                .insert(new_id, format!("open failed: {}", e));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!(
+                        "📹 Cameras: {}",
+                        self.camera_manager.available_cameras().len()
+                    ));
+                });
+            });
+        });
+
+        // カメラエラーの表示（別ウィンドウで表示）
+        if !self.camera_errors.is_empty() {
+            egui::Window::new("Camera Errors")
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::new(-10.0, -10.0))
+                .collapsible(true)
+                .show(ctx, |ui| {
+                    for camera in self.camera_manager.available_cameras() {
+                        if let Some(err) = self.camera_errors.get(&camera.id) {
+                            ui.colored_label(
+                                egui::Color32::RED,
+                                format!("{}: {}", camera.name, err),
+                            );
                         }
                     }
-                }
+                });
+        }
 
-                if new_preview != preview_idx
-                    && new_preview < self.camera_manager.available_cameras().len()
-                {
-                    let new_camera = &self.camera_manager.available_cameras()[new_preview];
-                    let new_id = new_camera.id;
-                    match self.camera_manager.open_camera(new_id) {
-                        Ok(_) => {
-                            self.preview_camera_id = Some(new_id);
-                            self.camera_errors.remove(&new_id);
-                        }
-                        Err(e) => {
-                            self.camera_errors
-                                .insert(new_id, format!("open failed: {}", e));
-                        }
-                    }
+        // ===== 入力を管理 ウィンドウ =====
+        let mut show_settings = self.show_input_settings;
+        egui::Window::new("Manage Inputs")
+            .open(&mut show_settings)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                let available_cameras = self.camera_manager.available_cameras().to_vec();
+
+                for idx in 0..self.layout_config.view_count() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Input {}:", idx + 1));
+
+                        let current_camera_id =
+                            self.layout_config.view(idx).and_then(|v| v.camera_id);
+
+                        let selected_text = if let Some(id) = current_camera_id {
+                            available_cameras
+                                .iter()
+                                .find(|c| c.id == id)
+                                .map(|c| c.name.clone())
+                                .unwrap_or_else(|| "Unknown".to_string())
+                        } else {
+                            "None".to_string()
+                        };
+
+                        egui::ComboBox::from_id_source(format!("input_select_{}", idx))
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                // "None" の選択肢
+                                let mut is_none = current_camera_id.is_none();
+                                if ui.selectable_value(&mut is_none, true, "None").clicked() {
+                                    self.layout_config.assign_camera(idx, None);
+                                }
+
+                                // 利用可能なカメラの選択肢
+                                for camera in &available_cameras {
+                                    let mut is_selected = current_camera_id == Some(camera.id);
+                                    if ui
+                                        .selectable_value(&mut is_selected, true, &camera.name)
+                                        .clicked()
+                                    {
+                                        // 選択されたカメラを開く
+                                        if let Err(e) = self.camera_manager.open_camera(camera.id) {
+                                            self.camera_errors
+                                                .insert(camera.id, format!("open failed: {}", e));
+                                        } else {
+                                            self.camera_errors.remove(&camera.id);
+                                        }
+                                        self.layout_config.assign_camera(idx, Some(camera.id));
+                                    }
+                                }
+                            });
+                    });
                 }
             });
-
-            if !self.camera_errors.is_empty() {
-                ui.separator();
-                ui.colored_label(egui::Color32::YELLOW, "Camera Errors:");
-                for camera in self.camera_manager.available_cameras() {
-                    if let Some(err) = self.camera_errors.get(&camera.id) {
-                        ui.colored_label(egui::Color32::RED, format!("{}: {}", camera.name, err));
-                    }
-                }
-            }
-        });
+        self.show_input_settings = show_settings;
 
         // ===== トップパネル（プレビュー＆プログラム）=====
         // CentralPanelの内部余白(margin)を0に設定する
@@ -337,52 +377,6 @@ impl eframe::App for CameraApp {
             let bottom_height = canvas_height - top_height;
             let top_view_width = canvas_width / 2;
 
-            // テクスチャ初期化（初回のみ、最小1x1）
-            if self.preview_texture.is_none() {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 255]);
-                self.preview_texture =
-                    Some(ctx.load_texture("preview", color_image, egui::TextureOptions::LINEAR));
-            }
-            if self.program_texture.is_none() {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 255]);
-                self.program_texture =
-                    Some(ctx.load_texture("program", color_image, egui::TextureOptions::LINEAR));
-            }
-            if self.multiview_texture.is_none() {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 255]);
-                self.multiview_texture =
-                    Some(ctx.load_texture("multiview", color_image, egui::TextureOptions::LINEAR));
-            }
-
-            let preview_pixels = self.preview_renderer.render(top_view_width, top_height);
-            let preview_image = egui::ColorImage::from_rgba_unmultiplied(
-                [top_view_width, top_height],
-                preview_pixels,
-            );
-            if let Some(texture) = &mut self.preview_texture {
-                texture.set(preview_image, egui::TextureOptions::LINEAR);
-            }
-
-            let program_pixels = self.program_renderer.render(top_view_width, top_height);
-            let program_image = egui::ColorImage::from_rgba_unmultiplied(
-                [top_view_width, top_height],
-                program_pixels,
-            );
-            if let Some(texture) = &mut self.program_texture {
-                texture.set(program_image, egui::TextureOptions::LINEAR);
-            }
-
-            let multiview_pixels = self.multiview_renderer.render(canvas_width, bottom_height);
-            let multiview_image = egui::ColorImage::from_rgba_unmultiplied(
-                [canvas_width, bottom_height],
-                multiview_pixels,
-            );
-            if let Some(texture) = &mut self.multiview_texture {
-                texture.set(multiview_image, egui::TextureOptions::LINEAR);
-            }
-
-            // --- ここから描画レイアウト処理の修正 ---
-
             // キャンバスを画面中央に配置するための開始座標（オフセット）を計算
             let x_offset = ((available.x - canvas_width as f32) / 2.0).max(0.0);
             let y_offset = ((available.y - canvas_height as f32) / 2.0).max(0.0);
@@ -390,40 +384,103 @@ impl eframe::App for CameraApp {
             // eguiの自動レイアウトを無視して、画面全体を自由に描画できる領域(Painter)として確保
             let (response, painter) = ui.allocate_painter(available, egui::Sense::hover());
 
-            // 実際のキャンバスの左上の基準点
+            // 背景を黒に塗りつぶす（空の入力枠などのため）
+            let bg_rect = egui::Rect::from_min_size(
+                response.rect.min + egui::vec2(x_offset, y_offset),
+                egui::vec2(canvas_width as f32, canvas_height as f32),
+            );
+            painter.rect_filled(bg_rect, 0.0, egui::Color32::BLACK);
+
+            // 画像のUVと描画をヘルパー関数で処理
+            let draw_cam = |camera_id: Option<CameraId>, rect: egui::Rect| {
+                // 枠のボーダーを描画
+                painter.rect(
+                    rect,
+                    0.0,
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+                    egui::StrokeKind::Inside,
+                );
+
+                if let Some(id) = camera_id {
+                    // テクスチャがあれば取得
+                    if let Some(tex) = self.camera_textures.get(&id) {
+                        let img_aspect = tex.width as f32 / tex.height as f32;
+                        let target_aspect = 16.0 / 9.0;
+                        
+                        let mut uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        
+                        // 画像が縦長の場合（上下をカット）
+                        if img_aspect < target_aspect {
+                            let crop_ratio = img_aspect / target_aspect;
+                            let offset = (1.0 - crop_ratio) / 2.0;
+                            uv = egui::Rect::from_min_max(
+                                egui::pos2(0.0, offset),
+                                egui::pos2(1.0, 1.0 - offset),
+                            );
+                        } 
+                        // 画像が横長の場合（左右をカット）
+                        else if img_aspect > target_aspect {
+                            let crop_ratio = target_aspect / img_aspect;
+                            let offset = (1.0 - crop_ratio) / 2.0;
+                            uv = egui::Rect::from_min_max(
+                                egui::pos2(offset, 0.0),
+                                egui::pos2(1.0 - offset, 1.0),
+                            );
+                        }
+
+                        painter.image(tex.handle.id(), rect, uv, egui::Color32::WHITE);
+                    }
+                }
+            };
+
             let base_pos = response.rect.min + egui::vec2(x_offset, y_offset);
 
-            // UV座標（画像のどの部分を描画するか。0.0~1.0で画像全体）
-            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            // ① プレビュー（左上）
+            let preview_rect = egui::Rect::from_min_size(
+                base_pos,
+                egui::vec2(top_view_width as f32, top_height as f32),
+            );
+            draw_cam(self.preview_camera_id, preview_rect);
 
-            // ① プレビュー（左上）を絶対座標で描画
-            if let Some(texture) = &self.preview_texture {
-                let rect = egui::Rect::from_min_size(
-                    base_pos,
-                    egui::vec2(top_view_width as f32, top_height as f32),
-                );
-                painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
-            }
+            // ② プログラム（右上）
+            let program_rect = egui::Rect::from_min_size(
+                base_pos + egui::vec2(top_view_width as f32, 0.0),
+                egui::vec2(top_view_width as f32, top_height as f32),
+            );
+            draw_cam(self.selected_camera_id, program_rect);
 
-            // ② プログラム（右上）を絶対座標で描画
-            if let Some(texture) = &self.program_texture {
-                let rect = egui::Rect::from_min_size(
-                    base_pos + egui::vec2(top_view_width as f32, 0.0),
-                    egui::vec2(top_view_width as f32, top_height as f32),
-                );
-                painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
-            }
+            // ③ マルチビュー（下段 4x2）
+            let mut view_idx = 0;
+            // self.layout_config.input_rows: usize, columns: usize があれば良いが
+            // layout::LayoutConfig の仕様が不明な場合決め打ちでもOK
+            // LayoutConfigに依存せず、常に 4x2 として描画
+            let cols = 4;
+            let rows = 2;
+            let cell_width = canvas_width as f32 / cols as f32;
+            let cell_height = bottom_height as f32 / rows as f32;
 
-            // ③ マルチビュー（下段）を絶対座標で描画
-            if let Some(texture) = &self.multiview_texture {
-                let rect = egui::Rect::from_min_size(
-                    base_pos + egui::vec2(0.0, top_height as f32),
-                    egui::vec2(canvas_width as f32, bottom_height as f32),
-                );
-                painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+            for r in 0..rows {
+                for c in 0..cols {
+                    let rect = egui::Rect::from_min_size(
+                        base_pos + egui::vec2(c as f32 * cell_width, top_height as f32 + r as f32 * cell_height),
+                        egui::vec2(cell_width, cell_height),
+                    );
+
+                    // レイアウト上のカメラIDを取得
+                    let cam_id = if view_idx < self.layout_config.view_count() {
+                        self.layout_config.view(view_idx).and_then(|v| v.camera_id)
+                    } else {
+                        None
+                    };
+
+                    draw_cam(cam_id, rect);
+                    view_idx += 1;
+                }
             }
         });
 
+        // アニメーションを維持するために再描画リクエスト
         ctx.request_repaint();
     }
 }

@@ -5,6 +5,8 @@
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::{Camera, native_api_backend, query};
+use std::sync::{mpsc, Arc};
+use std::thread;
 
 /// カメラIDの型安全なラッパー
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,14 +20,22 @@ pub struct CameraInfo {
     pub index: nokhwa::utils::CameraIndex,
 }
 
+/// フレームデータ構造体（Arcで共有してコピーを減らす）
+#[derive(Debug, Clone)]
+pub struct FrameData {
+    pub pixels: Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// カメラマネージャー
 ///
 /// 複数のカメラをアクティブに管理し、フレーム取得とカメラの切り替えを処理します。
 pub struct CameraManager {
     /// 利用可能なカメラの情報リスト
     available_cameras: Vec<CameraInfo>,
-    /// 現在アクティブなカメラマップ（ID -> Camera）
-    active_cameras: std::collections::HashMap<CameraId, Camera>,
+    /// カメラごとのフレーム受信チャネル（バックグラウンドスレッドで取得したフレームを受信）
+    active_receivers: std::collections::HashMap<CameraId, mpsc::Receiver<Result<FrameData, String>>>,
 }
 
 impl CameraManager {
@@ -48,7 +58,7 @@ impl CameraManager {
 
         Self {
             available_cameras,
-            active_cameras: std::collections::HashMap::new(),
+            active_receivers: std::collections::HashMap::new(),
         }
     }
 
@@ -61,7 +71,7 @@ impl CameraManager {
     ///
     /// 同じIDのカメラが既に開かれている場合は何もしません。
     pub fn open_camera(&mut self, camera_id: CameraId) -> Result<(), String> {
-        if self.active_cameras.contains_key(&camera_id) {
+        if self.active_receivers.contains_key(&camera_id) {
             return Ok(());
         }
 
@@ -71,76 +81,97 @@ impl CameraManager {
             .find(|c| c.id == camera_id)
             .ok_or_else(|| format!("Camera {:?} not found", camera_id))?;
 
-        let requested =
-            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+        let index = info.index.clone();
+        let (tx, rx) = mpsc::sync_channel(2);
 
-        let mut cam = Camera::new(info.index.clone(), requested)
-            .map_err(|e| format!("Failed to create camera: {}", e))?;
+        thread::spawn(move || {
+            let resolution = nokhwa::utils::Resolution::new(1280, 720);
+            let requested = RequestedFormat::new::<RgbFormat>(
+                RequestedFormatType::HighestResolution(resolution),
+            );
 
-        cam.open_stream()
-            .map_err(|e| format!("Failed to open stream: {}", e))?;
+            let mut cam = match Camera::new(index, requested) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(format!("Failed to create camera: {}", e)));
+                    return;
+                }
+            };
 
-        self.active_cameras.insert(camera_id, cam);
+            if let Err(e) = cam.open_stream() {
+                let _ = tx.send(Err(format!("Failed to open stream: {}", e)));
+                return;
+            }
+
+            loop {
+                let frame_res = cam.frame().map_err(|e| format!("Frame capture failed: {}", e));
+                
+                let processed_frame = frame_res.and_then(|frame| {
+                    let rgb_image = match frame.decode_image::<RgbFormat>() {
+                        Ok(img) => img,
+                        Err(e) => return Err(format!("Frame decode failed: {}", e))
+                    };
+
+                    let width = rgb_image.width();
+                    let height = rgb_image.height();
+                    let pixels = rgb_image.into_raw();
+
+                    if width == 0 || height == 0 {
+                        Err(format!("Invalid resolution: {}x{}", width, height))
+                    } else {
+                        Ok(FrameData {
+                            pixels: Arc::new(pixels),
+                            width,
+                            height,
+                        })
+                    }
+                });
+
+                if tx.send(processed_frame).is_err() {
+                    break;
+                }
+            }
+        });
+
+        self.active_receivers.insert(camera_id, rx);
         Ok(())
     }
 
     /// カメラを閉じる
     pub fn close_camera(&mut self, camera_id: CameraId) {
-        self.active_cameras.remove(&camera_id);
+        self.active_receivers.remove(&camera_id);
     }
 
-    /// カメラからフレームを取得
-    ///
-    /// 成功時はRGB画像データとサイズ(width, height)を返します。
-    pub fn get_frame(&mut self, camera_id: CameraId) -> Result<(Vec<u8>, u32, u32), String> {
-        if !self.active_cameras.contains_key(&camera_id) {
+    /// カメラから最新フレームだけを取得
+    pub fn get_frame(&mut self, camera_id: CameraId) -> Result<Option<FrameData>, String> {
+        if !self.active_receivers.contains_key(&camera_id) {
             self.open_camera(camera_id)?;
         }
 
-        let cam = self
-            .active_cameras
+        let rx = self
+            .active_receivers
             .get_mut(&camera_id)
             .ok_or_else(|| format!("Camera {:?} not open", camera_id))?;
 
-        let frame = cam
-            .frame()
-            .map_err(|e| format!("Frame capture failed: {}", e))?;
+        let mut latest_frame = None;
+        let mut last_error = None;
 
-        let rgb_image = frame
-            .decode_image::<RgbFormat>()
-            .map_err(|e| format!("Frame decode failed: {}", e))?;
-
-        let width = rgb_image.width();
-        let height = rgb_image.height();
-        let pixels = rgb_image.as_raw().to_vec();
-
-        // 解像度チェック
-        if width == 0 || height == 0 {
-            return Err(format!(
-                "Camera {:?} returned invalid resolution: {}x{}",
-                camera_id, width, height
-            ));
+        while let Ok(result) = rx.try_recv() {
+            match result {
+                Ok(frame) => latest_frame = Some(frame),
+                Err(e) => last_error = Some(e),
+            }
         }
 
-        // フレームデータサイズチェック
-        let expected_size = (width as usize) * (height as usize) * 3;
-        if pixels.len() != expected_size {
-            eprintln!(
-                "WARNING: Camera {:?} frame size mismatch: expected {} bytes for {}x{}, got {}",
-                camera_id,
-                expected_size,
-                width,
-                height,
-                pixels.len()
-            );
+        if let Some(e) = last_error {
+            return Err(e);
         }
-
-        Ok((pixels, width, height))
+        Ok(latest_frame)
     }
 
     /// すべてのアクティブなカメラを取得
     pub fn active_camera_ids(&self) -> Vec<CameraId> {
-        self.active_cameras.keys().copied().collect()
+        self.active_receivers.keys().copied().collect()
     }
 }
 
