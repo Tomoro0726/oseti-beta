@@ -59,8 +59,9 @@ impl CameraApp {
     fn fit_canvas_size(available: egui::Vec2) -> (usize, usize) {
         let target_aspect = 16.0f32 / 9.0f32;
 
-        let mut width = available.x.max(16.0);
-        let mut height = available.y.max(16.0);
+        // 画面ピッタリだとスクロールバーが出現してガタつく原因になるため、2pxの余裕を持たせる
+        let mut width = (available.x - 2.0).max(16.0);
+        let mut height = (available.y - 2.0).max(16.0);
 
         if width / height > target_aspect {
             width = height * target_aspect;
@@ -327,7 +328,9 @@ impl eframe::App for CameraApp {
         });
 
         // ===== トップパネル（プレビュー＆プログラム）=====
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // CentralPanelの内部余白(margin)を0に設定する
+        let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let available = ui.available_size();
             let (canvas_width, canvas_height) = Self::fit_canvas_size(available);
             let top_height = canvas_height / 2;
@@ -378,32 +381,47 @@ impl eframe::App for CameraApp {
                 texture.set(multiview_image, egui::TextureOptions::LINEAR);
             }
 
-            // 画面サイズに応じて中央に収めて表示
-            ui.vertical_centered(|ui| {
-                // eguiの自動余白（隙間）をゼロにしてピッタリ配置
-                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            // --- ここから描画レイアウト処理の修正 ---
 
-                ui.horizontal_centered(|ui| {
-                    if let Some(texture) = &self.preview_texture {
-                        ui.image((
-                            texture.id(),
-                            egui::vec2(top_view_width as f32, top_height as f32),
-                        ));
-                    }
-                    if let Some(texture) = &self.program_texture {
-                        ui.image((
-                            texture.id(),
-                            egui::vec2(top_view_width as f32, top_height as f32),
-                        ));
-                    }
-                });
-                if let Some(texture) = &self.multiview_texture {
-                    ui.image((
-                        texture.id(),
-                        egui::vec2(canvas_width as f32, bottom_height as f32),
-                    ));
-                }
-            });
+            // キャンバスを画面中央に配置するための開始座標（オフセット）を計算
+            let x_offset = ((available.x - canvas_width as f32) / 2.0).max(0.0);
+            let y_offset = ((available.y - canvas_height as f32) / 2.0).max(0.0);
+
+            // eguiの自動レイアウトを無視して、画面全体を自由に描画できる領域(Painter)として確保
+            let (response, painter) = ui.allocate_painter(available, egui::Sense::hover());
+
+            // 実際のキャンバスの左上の基準点
+            let base_pos = response.rect.min + egui::vec2(x_offset, y_offset);
+
+            // UV座標（画像のどの部分を描画するか。0.0~1.0で画像全体）
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
+            // ① プレビュー（左上）を絶対座標で描画
+            if let Some(texture) = &self.preview_texture {
+                let rect = egui::Rect::from_min_size(
+                    base_pos,
+                    egui::vec2(top_view_width as f32, top_height as f32),
+                );
+                painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+            }
+
+            // ② プログラム（右上）を絶対座標で描画
+            if let Some(texture) = &self.program_texture {
+                let rect = egui::Rect::from_min_size(
+                    base_pos + egui::vec2(top_view_width as f32, 0.0),
+                    egui::vec2(top_view_width as f32, top_height as f32),
+                );
+                painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+            }
+
+            // ③ マルチビュー（下段）を絶対座標で描画
+            if let Some(texture) = &self.multiview_texture {
+                let rect = egui::Rect::from_min_size(
+                    base_pos + egui::vec2(0.0, top_height as f32),
+                    egui::vec2(canvas_width as f32, bottom_height as f32),
+                );
+                painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+            }
         });
 
         ctx.request_repaint();
